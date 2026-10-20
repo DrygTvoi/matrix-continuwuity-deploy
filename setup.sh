@@ -1331,8 +1331,12 @@ EOF
 }
 
 write_caddyfile() {
-  local global_block bridge_block=""
+  local global_block bridge_block="" site_prefix=""
   if [[ "$PROXY_MODE" == "external" ]]; then
+    # The bundled Caddy sits behind the existing proxy, so its sites must be
+    # plain HTTP on port 80. Without the scheme Caddy defaults every hostname
+    # to HTTPS, listens on 443 and the published 80 port stays dead.
+    site_prefix="http://"
     global_block="{
     auto_https off
     servers {
@@ -1349,7 +1353,7 @@ write_caddyfile() {
   fi
   if [[ -n "$BRIDGES" ]]; then
     bridge_block="
-${BRIDGE_HOST} {
+${site_prefix}${BRIDGE_HOST} {
     encode zstd gzip
     log {
         output file /data/logs/access-bridge.log {
@@ -1404,7 +1408,7 @@ ${BRIDGE_HOST} {
   cat > config/Caddyfile <<EOF
 ${global_block}
 
-${DOMAIN} {
+${site_prefix}${DOMAIN} {
     encode zstd gzip
     log {
         output file /data/logs/access-hs.log {
@@ -1428,7 +1432,7 @@ ${DOMAIN} {
     }
 }
 
-${ELEMENT_HOST} {
+${site_prefix}${ELEMENT_HOST} {
     encode zstd gzip
     log {
         output file /data/logs/access-element.log {
@@ -1447,7 +1451,7 @@ ${ELEMENT_HOST} {
     reverse_proxy element-web:8080
 }
 
-${CALL_HOST} {
+${site_prefix}${CALL_HOST} {
     encode zstd gzip
     log {
         output file /data/logs/access-call.log {
@@ -1466,7 +1470,7 @@ ${CALL_HOST} {
     reverse_proxy element-call:8080
 }
 
-${SFU_HOST} {
+${site_prefix}${SFU_HOST} {
     encode zstd gzip
     log {
         output file /data/logs/access-sfu.log {
@@ -1490,7 +1494,7 @@ ${SFU_HOST} {
     }
 }
 
-${NTFY_HOST} {
+${site_prefix}${NTFY_HOST} {
     encode zstd gzip
     log {
         output file /data/logs/access-ntfy.log {
@@ -1508,7 +1512,7 @@ ${NTFY_HOST} {
     reverse_proxy ntfy:8080
 }
 
-${STATUS_HOST} {
+${site_prefix}${STATUS_HOST} {
     encode zstd gzip
     log {
         output file /data/logs/access-status.log {

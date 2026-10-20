@@ -34,6 +34,9 @@ jobs:
           docker compose config --quiet
           test -f config/proxy/nginx.conf
           grep -q 'auto_https off' config/Caddyfile
+          # Behind an external proxy Caddy must bind plain HTTP on :80.
+          grep -q '^http://matrix.test {' config/Caddyfile
+          ! grep -qE '^[A-Za-z0-9.-]+ \{' config/Caddyfile
 
       - name: JSON configs
         run: |
