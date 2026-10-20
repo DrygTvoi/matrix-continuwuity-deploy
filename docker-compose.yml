@@ -1,167 +1,253 @@
+# Matrix stack: Continuwuity + Element Web/Call + LiveKit + TURN + ntfy + Uptime Kuma
+#
+# Generated configs live in ./config (gitignored). Run ./setup.sh first.
+# Bridges are optional profiles: telegram, discord, whatsapp, signal.
+
+name: matrix-conduit
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
-  conduit:
-    image: matrixconduit/matrix-conduit:latest
+  # ── Homeserver ──────────────────────────────────────────────────────────────
+  continuwuity:
+    image: ghcr.io/continuwuity/continuwuity:v26.9.1
     restart: unless-stopped
-    env_file: .env
+    command: ["/sbin/conduwuit", "-c", "/etc/continuwuity/continuwuity.toml"]
     environment:
-      CONDUIT_CONFIG: /etc/conduit.toml
-      CONDUIT_TURN_SECRET: ${TURN_SHARED_SECRET}
+      CONTINUWUITY_CONFIG: /etc/continuwuity/continuwuity.toml
+      CONTINUWUITY_DATABASE_PATH: /var/lib/continuwuity
+      HOME: /tmp
+    user: "${PUID:-1000}:${PGID:-1000}"
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     volumes:
-      - ./conduit/conduit.toml:/etc/conduit.toml:ro
-      - ./data/conduit:/var/lib/matrix-conduit
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
+      - ./config/continuwuity.toml:/etc/continuwuity/continuwuity.toml:ro
+      - ./data/continuwuity:/var/lib/continuwuity
+    stop_grace_period: 30s
+    logging: *default-logging
 
-  livekit:
-    image: livekit/livekit-server:latest
+  # ── Reverse proxy / TLS ─────────────────────────────────────────────────────
+  caddy:
+    image: caddy:2.11.7
     restart: unless-stopped
-    env_file: .env
-    environment:
-      LIVEKIT_CONFIG: |
-        port: 7880
-        log_level: info
+    user: "${PUID:-1000}:${PGID:-1000}"
+    depends_on:
+      - continuwuity
+      - element-web
+      - element-call
+      - livekit
+      - lk-jwt
+      - ntfy
+      - uptime-kuma
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - ./config/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./data/caddy/data:/data
+      - ./data/caddy/config:/config
+    logging: *default-logging
 
-        rtc:
-          tcp_port: 7881
-          port_range_start: 49160
-          port_range_end: 49200
-          use_external_ip: true
-
-          stun_servers:
-            - stun.l.google.com:19302
-
-          turn_servers:
-            - host: ${TURN_HOST}
-              port: 3478
-              protocol: udp
-              username: ${LIVEKIT_TURN_USER}
-              credential: ${LIVEKIT_TURN_PASS}
-            - host: ${TURN_HOST}
-              port: 3478
-              protocol: tcp
-              username: ${LIVEKIT_TURN_USER}
-              credential: ${LIVEKIT_TURN_PASS}
-            - host: ${TURN_HOST}
-              port: 5349
-              protocol: tls
-              username: ${LIVEKIT_TURN_USER}
-              credential: ${LIVEKIT_TURN_PASS}
-
-        keys:
-          ${LIVEKIT_API_KEY}: ${LIVEKIT_API_SECRET}
+  # ── Voice/video ─────────────────────────────────────────────────────────────
+  livekit:
+    image: livekit/livekit-server:v1.13.10
+    restart: unless-stopped
+    command: ["--config", "/etc/livekit.yaml"]
+    user: "${PUID:-1000}:${PGID:-1000}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - ./config/livekit.yaml:/etc/livekit.yaml:ro
     ports:
       - "7881:7881/tcp"
       - "7881:7881/udp"
       - "49160-49200:49160-49200/udp"
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
+    logging: *default-logging
 
   lk-jwt:
-    image: ghcr.io/element-hq/lk-jwt-service:0.3.0
+    image: ghcr.io/element-hq/lk-jwt-service:0.9.0
     restart: unless-stopped
-    env_file: .env
+    depends_on:
+      - livekit
+    user: "${PUID:-1000}:${PGID:-1000}"
     environment:
-      LIVEKIT_JWT_PORT: ${LIVEKIT_JWT_PORT}
-      LIVEKIT_URL: ${LIVEKIT_URL}
-      LIVEKIT_KEY: ${LIVEKIT_API_KEY}
-      LIVEKIT_SECRET: ${LIVEKIT_API_SECRET}
-      LIVEKIT_FULL_ACCESS_HOMESERVERS: ${SERVER_NAME}
-      LIVEKIT_LOCAL_HOMESERVERS: ${SERVER_NAME}
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
+      LIVEKIT_JWT_BIND: ":8080"
+      LIVEKIT_URL: "wss://${SFU_HOST:-sfu.${SERVER_NAME}}"
+      LIVEKIT_KEY: "${LIVEKIT_API_KEY}"
+      LIVEKIT_SECRET: "${LIVEKIT_API_SECRET}"
+      LIVEKIT_FULL_ACCESS_HOMESERVERS: "${SERVER_NAME}"
+      LIVEKIT_LOG_LEVEL: "info"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
 
   element-call:
-    image: ghcr.io/element-hq/element-call:v0.14.1
+    image: ghcr.io/element-hq/element-call:v0.28.0
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
     volumes:
-      - ./element-call/config.json:/usr/share/nginx/html/config.json:ro
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
-
-  caddy:
-    image: caddy:2
-    depends_on:
-      - conduit
-      - livekit
-      - lk-jwt
-      - element-call
-    restart: unless-stopped
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./element-call/config.json:/srv/call/config.json:ro
-      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
-      - ./well-known:/srv/well-known:ro
-      - caddy_data:/data
-      - caddy_config:/config
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
-    networks:
-    - default
-    - proxy
+      - ./config/element-call.json:/app/config.json:ro
+    logging: *default-logging
 
   coturn:
-    image: instrumentisto/coturn
+    image: coturn/coturn:4.18.0
     restart: unless-stopped
-    network_mode: "host"
+    network_mode: host
     user: "0:0"
-    env_file: .env
+    command: ["-c", "/etc/coturn/turnserver.conf"]
+    security_opt:
+      - no-new-privileges:true
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     volumes:
-      - ./coturn/turnserver.conf:/etc/turnserver.conf:ro
-      - /etc/letsencrypt:/etc/letsencrypt:ro
-    command:
-      - turnserver
-      - -c
-      - /etc/turnserver.conf
-      - --static-auth-secret=${TURN_SHARED_SECRET}
-      - -v
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
+      - ./config/turnserver.conf:/etc/coturn/turnserver.conf:ro
+    logging: *default-logging
 
-  turn-config:
-    build: ./turn-config
+  # ── Clients ─────────────────────────────────────────────────────────────────
+  element-web:
+    image: ghcr.io/element-hq/element-web:v1.12.32
     restart: unless-stopped
-    env_file: .env
     environment:
-      PORT: 3000
-      BASE_URL: https://${SERVER_NAME}
-      HOMESERVER: ${SERVER_NAME}
-      JWT_SERVICE_URL: https://sfu.${SERVER_NAME}/sfu/get
-      LIVEKIT_SERVICE_URL: ${LIVEKIT_URL}
-      TURN_HOST: ${TURN_HOST}
-      TURN_REALM: ${TURN_REALM}
-      TURN_TTL: ${TURN_TTL}
-      TURN_NAME: elementcall
-      TURN_SECRET: ${TURN_SHARED_SECRET}
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
+      ELEMENT_WEB_PORT: "8080"
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - ./config/element-web.json:/app/config.json:ro
+    logging: *default-logging
 
-volumes:
-  caddy_data:
-  caddy_config:
+  # ── Push notifications ──────────────────────────────────────────────────────
+  ntfy:
+    image: binwiederhier/ntfy:v2.32.0
+    restart: unless-stopped
+    user: "${PUID:-1000}:${PGID:-1000}"
+    command: ["serve"]
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - ./config/ntfy.yml:/etc/ntfy/server.yml:ro
+      - ./data/ntfy:/var/cache/ntfy
+      - ./data/ntfy:/var/lib/ntfy
+    logging: *default-logging
 
-networks:
-  proxy:
-    external: true
+  # ── Monitoring ──────────────────────────────────────────────────────────────
+  uptime-kuma:
+    image: louislam/uptime-kuma:2.5.6
+    restart: unless-stopped
+    user: "${PUID:-1000}:${PGID:-1000}"
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - ./data/uptime-kuma:/app/data
+    logging: *default-logging
+
+  healthcheck:
+    image: curlimages/curl:8.16.0
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/healthcheck.sh"]
+    environment:
+      NTFY_URL: "http://ntfy:8080"
+      NTFY_TOPIC: "${NTFY_ALERT_TOPIC:-alerts}"
+      CHECK_INTERVAL: "60"
+      ALERT_REPEAT: "30"
+    user: "100:100"
+    read_only: true
+    tmpfs:
+      - /tmp:size=1m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      - continuwuity
+      - element-web
+      - element-call
+      - livekit
+      - lk-jwt
+      - ntfy
+    volumes:
+      - ./scripts/healthcheck.sh:/healthcheck.sh:ro
+    logging: *default-logging
+
+  # ── Bridges (optional; enable with COMPOSE_PROFILES in .env) ────────────────
+  mautrix-telegram:
+    image: dock.mau.dev/mautrix/telegram:v0.2610.0
+    restart: unless-stopped
+    profiles: ["telegram"]
+    depends_on:
+      - continuwuity
+    environment:
+      UID: "${PUID:-1000}"
+      GID: "${PGID:-1000}"
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - ./bridges/telegram:/data
+    logging: *default-logging
+
+  mautrix-discord:
+    image: dock.mau.dev/mautrix/discord:v0.7.7
+    restart: unless-stopped
+    profiles: ["discord"]
+    depends_on:
+      - continuwuity
+    environment:
+      UID: "${PUID:-1000}"
+      GID: "${PGID:-1000}"
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - ./bridges/discord:/data
+    logging: *default-logging
+
+  mautrix-whatsapp:
+    image: dock.mau.dev/mautrix/whatsapp:v0.2610.0
+    restart: unless-stopped
+    profiles: ["whatsapp"]
+    depends_on:
+      - continuwuity
+    environment:
+      UID: "${PUID:-1000}"
+      GID: "${PGID:-1000}"
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - ./bridges/whatsapp:/data
+    logging: *default-logging
+
+  mautrix-signal:
+    image: dock.mau.dev/mautrix/signal:v0.2610.0
+    restart: unless-stopped
+    profiles: ["signal"]
+    depends_on:
+      - continuwuity
+    environment:
+      UID: "${PUID:-1000}"
+      GID: "${PGID:-1000}"
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - ./bridges/signal:/data
+    logging: *default-logging

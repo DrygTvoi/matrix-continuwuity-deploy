@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Bash syntax
+        run: |
+          bash -n setup.sh
+          for f in scripts/*.sh; do bash -n "$f"; done
+
+      - name: Python syntax
+        run: python3 -m py_compile scripts/*.py
+
+      - name: Generate configs (bundled proxy)
+        run: |
+          NON_INTERACTIVE=1 PROXY_MODE=bundled DOMAIN=matrix.test \
+            SERVER_IP=203.0.113.10 ADMIN_EMAIL=admin@matrix.test BRIDGES= \
+            ./setup.sh --no-start
+          docker compose config --quiet
+
+      - name: Generate configs (external proxy)
+        run: |
+          NON_INTERACTIVE=1 PROXY_MODE=external DOMAIN=matrix.test \
+            SERVER_IP=203.0.113.10 ADMIN_EMAIL=admin@matrix.test BRIDGES= \
+            ELEMENT_HOST=element.example1.com SFU_HOST=sfu.example2.com \
+            ./setup.sh --no-start
+          docker compose config --quiet
+          test -f config/proxy/nginx.conf
+          grep -q 'auto_https off' config/Caddyfile
+
+      - name: JSON configs
+        run: |
+          python3 -m json.tool renovate.json >/dev/null
