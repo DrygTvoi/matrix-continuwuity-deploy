@@ -1423,7 +1423,7 @@ ${site_prefix}${DOMAIN} {
         Referrer-Policy "strict-origin-when-cross-origin"
         -Server
     }
-    @matrix path /_matrix/* /.well-known/matrix/* /.well-known/openid-configuration /.well-known/oauth-authorization-server
+    @matrix path /_matrix/* /.well-known/matrix/* /.well-known/openid-configuration /.well-known/oauth-authorization-server /_continuwuity/*
     handle @matrix {
         reverse_proxy continuwuity:8008
     }
